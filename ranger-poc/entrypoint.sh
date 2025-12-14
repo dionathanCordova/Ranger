@@ -16,9 +16,13 @@ echo "✅ PostgreSQL disponível!"
 
 # ----- Aguarda Keycloak (se configurado) -----
 if [ -n "$ranger_openid_provider_url" ]; then
+  # Extrai host e porta da URL do Keycloak
   KEYCLOAK_HOST=$(echo $ranger_openid_provider_url | sed -E 's|http[s]?://([^:/]+).*|\1|')
-  KEYCLOAK_PORT=$(echo $ranger_openid_provider_url | sed -E 's|http[s]?://[^:]+:([0-9]+).*|\1|')
-  KEYCLOAK_PORT=${KEYCLOAK_PORT:-8080}
+  if echo $ranger_openid_provider_url | grep -qE ':[0-9]+'; then
+    KEYCLOAK_PORT=$(echo $ranger_openid_provider_url | sed -E 's|http[s]?://[^:]+:([0-9]+).*|\1|')
+  else
+    KEYCLOAK_PORT=8080
+  fi
   
   echo "⏳ Aguardando Keycloak em ${KEYCLOAK_HOST}:${KEYCLOAK_PORT}..."
   while ! nc -z "${KEYCLOAK_HOST}" "${KEYCLOAK_PORT}"; do
@@ -41,20 +45,10 @@ sed -i "s|^db_root_password=.*|db_root_password=${db_root_password:-ranger}|g" $
 if [ "$SUPPORTED_AUTHENTICATION_METHODS" == "openidconnect" ] && [ -n "$ranger_openid_provider_url" ]; then
   echo "🔐 Configurando autenticação OpenID Connect..."
   
-  # Cria/atualiza arquivo de configuração do OIDC
-  cat >> $RANGER_HOME/install.properties << EOF
-
-# ----- OpenID Connect Configuration -----
-ranger.authentication.method=NONE
-ranger.sso.enabled=false
-EOF
-
-  # Configura o ranger-admin-site.xml após setup
-  OIDC_CONFIG="
-ranger.authentication.method=NONE
-ranger.sso.browser.useragent=Mozilla,Opera,Chrome,Safari
-ranger.sso.enabled=false
-"
+  # Atualiza authentication_method no install.properties
+  sed -i "s|^authentication_method=.*|authentication_method=openidconnect|g" $RANGER_HOME/install.properties
+  sed -i "s|^sso_enabled=.*|sso_enabled=true|g" $RANGER_HOME/install.properties
+  sed -i "s|^sso_providerurl=.*|sso_providerurl=${ranger_openid_provider_url}|g" $RANGER_HOME/install.properties
 fi
 
 # ----- Executa o setup do Ranger -----
@@ -72,13 +66,16 @@ if [ "$SUPPORTED_AUTHENTICATION_METHODS" == "openidconnect" ] && [ -n "$ranger_o
   
   # Adiciona configurações OIDC antes do </configuration>
   if [ -f "$SITE_XML" ]; then
+    # Remove </configuration> temporariamente
     sed -i 's|</configuration>||g' $SITE_XML
+    
+    # Adiciona configurações OIDC
     cat >> $SITE_XML << EOF
 
   <!-- OpenID Connect Configuration -->
   <property>
     <name>ranger.authentication.method</name>
-    <value>NONE</value>
+    <value>openidconnect</value>
   </property>
   <property>
     <name>ranger.sso.enabled</name>
@@ -89,6 +86,10 @@ if [ "$SUPPORTED_AUTHENTICATION_METHODS" == "openidconnect" ] && [ -n "$ranger_o
     <value>${ranger_openid_provider_url}/protocol/openid-connect/auth</value>
   </property>
   <property>
+    <name>ranger.sso.publickey</name>
+    <value></value>
+  </property>
+  <property>
     <name>ranger.sso.browser.useragent</name>
     <value>Mozilla,Opera,Chrome,Safari,Edge</value>
   </property>
@@ -96,10 +97,24 @@ if [ "$SUPPORTED_AUTHENTICATION_METHODS" == "openidconnect" ] && [ -n "$ranger_o
     <name>ranger.sso.token.audiences</name>
     <value>${ranger_openid_client_id}</value>
   </property>
+  <property>
+    <name>ranger.sso.client.id</name>
+    <value>${ranger_openid_client_id}</value>
+  </property>
+  <property>
+    <name>ranger.sso.client.secret</name>
+    <value>${ranger_openid_client_secret}</value>
+  </property>
+  <property>
+    <name>ranger.sso.redirect.uri</name>
+    <value>${ranger_openid_redirect_uri}</value>
+  </property>
   
 </configuration>
 EOF
     echo "✅ Configuração OIDC aplicada!"
+  else
+    echo "⚠️  Arquivo ranger-admin-site.xml não encontrado. OIDC pode não funcionar corretamente."
   fi
 fi
 
