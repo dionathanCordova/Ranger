@@ -7,8 +7,8 @@ ENV RANGER_VERSION=2.4.0
 RUN apt-get update && \
     apt-get install -y openjdk-11-jdk wget curl \
                        python3 python3-pip sudo bc \
-                       netcat-openbsd net-tools && \
-    apt-get clean && \
+                       netcat-openbsd net-tools maven \
+                       && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
@@ -61,25 +61,93 @@ RUN set -eux; \
     rm apache-ranger-${RANGER_VERSION}.tar.gz && \
     echo "✅ Extração concluída."
 
-# Extrai o ranger-admin
-# Verifica se o arquivo admin existe antes de extrair
-RUN if [ -f /opt/apache-ranger-${RANGER_VERSION}/target/ranger-${RANGER_VERSION}-admin.tar.gz ]; then \
-        echo "✅ Extraindo ranger-admin..."; \
-        tar -xzf /opt/apache-ranger-${RANGER_VERSION}/target/ranger-${RANGER_VERSION}-admin.tar.gz -C /opt && \
-        rm -rf /opt/apache-ranger-${RANGER_VERSION} && \
-        echo "✅ Ranger-admin extraído com sucesso."; \
-    elif [ -f /opt/apache-ranger-${RANGER_VERSION}/ranger-${RANGER_VERSION}-admin.tar.gz ]; then \
-        echo "✅ Extraindo ranger-admin (localização alternativa)..."; \
-        tar -xzf /opt/apache-ranger-${RANGER_VERSION}/ranger-${RANGER_VERSION}-admin.tar.gz -C /opt && \
-        rm -rf /opt/apache-ranger-${RANGER_VERSION} && \
-        echo "✅ Ranger-admin extraído com sucesso."; \
-    else \
-        echo "❌ Erro: Arquivo ranger-admin não encontrado."; \
-        echo "Estrutura do diretório:"; \
-        ls -la /opt/apache-ranger-${RANGER_VERSION}/ || true; \
-        find /opt/apache-ranger-${RANGER_VERSION}/ -name "*admin*.tar.gz" || true; \
+# Procura e extrai o ranger-admin
+# O tarball pode ser código-fonte ou binário pré-compilado
+RUN set -eux; \
+    echo "=========================================="; \
+    echo "Procurando ranger-admin..."; \
+    echo "=========================================="; \
+    ADMIN_FOUND=false; \
+    # Procura em várias localizações possíveis \
+    for ADMIN_PATH in \
+        "/opt/apache-ranger-${RANGER_VERSION}/target/ranger-${RANGER_VERSION}-admin.tar.gz" \
+        "/opt/apache-ranger-${RANGER_VERSION}/ranger-${RANGER_VERSION}-admin.tar.gz" \
+        "/opt/apache-ranger-${RANGER_VERSION}/security-admin/target/ranger-${RANGER_VERSION}-admin.tar.gz" \
+        "/opt/apache-ranger-${RANGER_VERSION}/distro/target/ranger-${RANGER_VERSION}-admin.tar.gz"; \
+    do \
+        if [ -f "$ADMIN_PATH" ]; then \
+            echo "✅ Encontrado em: $ADMIN_PATH"; \
+            echo "Extraindo ranger-admin..."; \
+            tar -xzf "$ADMIN_PATH" -C /opt && \
+            ADMIN_FOUND=true; \
+            break; \
+        fi; \
+    done; \
+    # Se não encontrou arquivo tar.gz, procura diretório já extraído \
+    if [ "$ADMIN_FOUND" = false ]; then \
+        echo "Arquivo tar.gz não encontrado. Procurando diretório ranger-admin..."; \
+        for ADMIN_DIR in \
+            "/opt/apache-ranger-${RANGER_VERSION}/target/ranger-${RANGER_VERSION}-admin" \
+            "/opt/apache-ranger-${RANGER_VERSION}/ranger-${RANGER_VERSION}-admin" \
+            "/opt/ranger-${RANGER_VERSION}-admin"; \
+        do \
+            if [ -d "$ADMIN_DIR" ] && [ -f "$ADMIN_DIR/ews/ranger-admin-services.sh" ]; then \
+                echo "✅ Diretório admin encontrado em: $ADMIN_DIR"; \
+                cp -r "$ADMIN_DIR" /opt/ranger-${RANGER_VERSION}-admin && \
+                ADMIN_FOUND=true; \
+                break; \
+            fi; \
+        done; \
+    fi; \
+    # Se ainda não encontrou, tenta baixar o binário diretamente \
+    if [ "$ADMIN_FOUND" = false ]; then \
+        echo "Tentando baixar binário pré-compilado diretamente..."; \
+        for ADMIN_URL in \
+            "https://archive.apache.org/dist/ranger/${RANGER_VERSION}/ranger-${RANGER_VERSION}-admin.tar.gz" \
+            "https://downloads.apache.org/ranger/${RANGER_VERSION}/ranger-${RANGER_VERSION}-admin.tar.gz"; \
+        do \
+            if wget --tries=2 --timeout=60 --no-check-certificate \
+                "$ADMIN_URL" -O /tmp/ranger-admin.tar.gz 2>/dev/null; then \
+                if [ -s /tmp/ranger-admin.tar.gz ]; then \
+                    echo "✅ Download do binário admin bem-sucedido!"; \
+                    tar -xzf /tmp/ranger-admin.tar.gz -C /opt && \
+                    rm /tmp/ranger-admin.tar.gz && \
+                    ADMIN_FOUND=true; \
+                    break; \
+                fi; \
+            fi; \
+        done; \
+    fi; \
+    # Se ainda não encontrou, tenta compilar (pode levar muito tempo) \
+    if [ "$ADMIN_FOUND" = false ]; then \
+        echo "⚠️  Binário não encontrado. Tentando compilar o código-fonte..."; \
+        echo "⚠️  ATENÇÃO: Isso pode levar 10-30 minutos!"; \
+        cd /opt/apache-ranger-${RANGER_VERSION} && \
+        echo "Compilando apenas o módulo security-admin..."; \
+        mvn clean package -DskipTests -DskipITs -pl security-admin -am -q && \
+        if [ -f "security-admin/target/ranger-${RANGER_VERSION}-admin.tar.gz" ]; then \
+            echo "✅ Compilação concluída!"; \
+            tar -xzf security-admin/target/ranger-${RANGER_VERSION}-admin.tar.gz -C /opt && \
+            ADMIN_FOUND=true; \
+        else \
+            echo "❌ Compilação falhou ou arquivo não gerado."; \
+            echo "Verificando estrutura do security-admin..."; \
+            ls -la security-admin/target/ 2>/dev/null || true; \
+        fi; \
+    fi; \
+    # Limpa código-fonte se admin foi encontrado \
+    if [ "$ADMIN_FOUND" = true ] && [ -d "/opt/apache-ranger-${RANGER_VERSION}" ]; then \
+        echo "Limpando código-fonte..."; \
+        rm -rf /opt/apache-ranger-${RANGER_VERSION}; \
+    fi; \
+    # Verifica se o admin foi instalado corretamente \
+    if [ ! -d "/opt/ranger-${RANGER_VERSION}-admin" ] || [ ! -f "/opt/ranger-${RANGER_VERSION}-admin/ews/ranger-admin-services.sh" ]; then \
+        echo "❌ Erro: ranger-admin não foi instalado corretamente."; \
+        echo "Estrutura em /opt:"; \
+        ls -la /opt/ || true; \
         exit 1; \
-    fi
+    fi; \
+    echo "✅ Ranger-admin instalado com sucesso em /opt/ranger-${RANGER_VERSION}-admin"
 
 WORKDIR /opt/ranger-${RANGER_VERSION}-admin
 
